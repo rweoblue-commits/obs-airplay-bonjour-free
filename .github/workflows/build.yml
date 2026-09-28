@@ -369,7 +369,8 @@ jobs:
         run: |
           # Current UxPlay comments out the unused conn_teardown callback,
           # while obs-airplay-receiver still initializes that field.
-          sed -i '/callbacks\.conn_teardown/d' src/airplay-source.c
+          python -c "from pathlib import Path; p=Path('src/airplay-source.c'); s=p.read_text(); s=s.replace('cbs.conn_teardown = cb_conn_teardown;', ''); p.write_text(s)"
+          if grep -q 'cbs.conn_teardown' src/airplay-source.c; then echo "ERROR: conn_teardown patch failed"; exit 1; fi
 
       - name: Patch plugin FFmpeg 8.1 runtime names
         shell: bash
