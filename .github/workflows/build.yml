@@ -364,6 +364,21 @@ jobs:
           cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=cl -DOPENSSL_DIR="${{ steps.openssl.outputs.dir }}" -DCMAKE_SHARED_LINKER_FLAGS="/MAP:obs-airplay-receiver.map /MAPINFO:EXPORTS" || exit /b 1
           nmake || exit /b 1
 
+      - name: Guard AirPlay audio output against zero-rate OBS crash
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path("src/airplay-source.c")
+          s=p.read_text()
+          old="""\tif (!obs_audio.data[0] || !obs_audio.frames ||\n\t    obs_audio.frames > MAX_AUDIO_FRAMES_PER_PACKET ||\n\t    obs_audio.samples_per_sec < 8000 ||\n\t    obs_audio.samples_per_sec > 192000)\n\t\tgoto done;"""
+          new="""\t/* Reject malformed/partially initialized audio before OBS sees it.\n\t * A zero sample rate reaches an integer division in the OBS audio path. */\n\tif (!obs_audio.data[0] || !obs_audio.frames ||\n\t    obs_audio.frames > MAX_AUDIO_FRAMES_PER_PACKET ||\n\t    obs_audio.samples_per_sec == 0 ||\n\t    obs_audio.samples_per_sec < 8000 ||\n\t    obs_audio.samples_per_sec > 192000)\n\t\tgoto done;"""
+          if old not in s:
+              raise SystemExit("audio validation pattern not found")
+          p.write_text(s.replace(old,new))
+          PY
+          grep -n -A8 "Reject malformed" src/airplay-source.c
+
       - name: Patch UxPlay 1.74 dnssd_init argument order
         shell: bash
         run: |
