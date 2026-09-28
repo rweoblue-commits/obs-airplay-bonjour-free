@@ -421,6 +421,11 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
+      - name: Patch installer FFmpeg 8.1 runtime names
+        shell: bash
+        run: |
+          sed -i 's/avcodec-61/avcodec-62/g; s/avutil-59/avutil-60/g; s/swscale-8/swscale-9/g; s/swresample-5/swresample-6/g' installer.iss
+
       - name: Build installer exe
         shell: cmd
         run: |
