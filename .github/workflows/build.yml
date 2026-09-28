@@ -364,6 +364,13 @@ jobs:
           cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DOPENSSL_DIR="${{ steps.openssl.outputs.dir }}" || exit /b 1
           nmake || exit /b 1
 
+      - name: Patch UxPlay callback compatibility
+        shell: bash
+        run: |
+          # Current UxPlay comments out the unused conn_teardown callback,
+          # while obs-airplay-receiver still initializes that field.
+          sed -i '/callbacks\.conn_teardown/d' src/airplay-source.c
+
       - name: Patch plugin FFmpeg 8.1 runtime names
         shell: bash
         run: |
