@@ -367,7 +367,8 @@ jobs:
       - name: Patch plugin FFmpeg 8.1 runtime names
         shell: bash
         run: |
-          sed -i 's/avcodec-61\\.dll/avcodec-62.dll/g; s/avutil-59\\.dll/avutil-60.dll/g; s/swscale-8\\.dll/swscale-9.dll/g; s/swresample-5\\.dll/swresample-6.dll/g' CMakeLists.txt
+          sed -i 's/avcodec-61/avcodec-62/g; s/avutil-59/avutil-60/g; s/swscale-8/swscale-9/g; s/swresample-5/swresample-6/g' CMakeLists.txt
+          grep -nE 'avcodec-(61|62)|avutil-(59|60)|swscale-(8|9)|swresample-(5|6)' CMakeLists.txt
 
       - name: Build plugin
         shell: cmd
