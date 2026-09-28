@@ -269,6 +269,10 @@ jobs:
           #endif
           THEOF
 
+          # MSVC has no ssize_t in sys/types.h. UxPlay's Windows code uses
+          # SSIZE_T from BaseTsd; provide the POSIX spelling expected by raop_ntp.h.
+          sed -i '/#include <sys\/types.h>/a #ifdef _WIN32\n#include <BaseTsd.h>\ntypedef SSIZE_T ssize_t;\n#endif' "$UXLIB/raop_ntp.h"
+
           # byteutils.c and raop_ntp.c are Windows-portable in UxPlay 1.73.6.
           # raop_rtp_mirror.c guards SOL_TCP with defined(IPPROTO_TCP), but on
           # MSVC IPPROTO_TCP is an enum (not a macro) so the guard never fires
