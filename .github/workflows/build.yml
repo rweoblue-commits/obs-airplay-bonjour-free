@@ -1,0 +1,412 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download obs-airplay-receiver source
+        shell: bash
+        run: |
+          curl -L -o source.zip "https://github.com/aomkoyo/obs-airplay-receiver/archive/refs/heads/master.zip"
+          unzip -q source.zip -d upstream
+          shopt -s dotglob
+          cp -R upstream/obs-airplay-receiver-master/* .
+          rm -rf upstream source.zip
+
+      - name: Setup MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install OpenSSL via Chocolatey
+        run: choco install openssl -y --no-progress
+
+      - name: Create deps directory
+        shell: bash
+        run: mkdir -p deps
+
+      - name: Clone UxPlay 1.74+ with internal mDNS
+        shell: bash
+        run: |
+          git clone --depth 1 \
+            https://github.com/FDH2/UxPlay.git deps/UxPlay
+
+      # OBS 32+ rejects modules built against a newer libobs. Building with the
+      # oldest supported SDK produces one binary that loads on OBS 30 and newer.
+      - name: Download baseline OBS Studio SDK 30.0.0
+        shell: bash
+        run: |
+          curl -L -o deps/obs-sdk.zip \
+            "https://github.com/obsproject/obs-studio/archive/refs/tags/30.0.0.zip"
+          mkdir -p deps/obs-sdk
+          cd deps/obs-sdk
+          unzip -q ../obs-sdk.zip
+
+      - name: Create obsconfig.h for OBS SDK
+        shell: bash
+        run: |
+          cat > deps/obs-sdk/obs-studio-30.0.0/libobs/obsconfig.h << 'EOF'
+          #pragma once
+          #define OBS_DATA_PATH "data"
+          #define OBS_PLUGIN_PATH "obs-plugins/64bit"
+          #define OBS_PLUGIN_DESTINATION "obs-plugins/64bit"
+          #define OBS_RELEASE_CANDIDATE 0
+          #define OBS_BETA 0
+          EOF
+
+      # Ship our own FFmpeg 7 DLLs. OBS 32.2 moved to FFmpeg 8 and no longer
+      # contains the avcodec-61/avutil-59 DLLs this plugin was linked against.
+      - name: Download FFmpeg 7.1 shared runtime and SDK
+        shell: bash
+        run: |
+          curl -L -o deps/ffmpeg7-shared.zip \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-lgpl-shared-7.1.zip"
+          mkdir -p deps/ffmpeg7-extract
+          unzip -q deps/ffmpeg7-shared.zip -d deps/ffmpeg7-extract
+          mv deps/ffmpeg7-extract/ffmpeg-* deps/ffmpeg7-runtime
+          for file in \
+            include/libavcodec/avcodec.h lib/avcodec.lib \
+            bin/avcodec-61.dll bin/avutil-59.dll \
+            bin/swscale-8.dll bin/swresample-5.dll; do
+            test -f "deps/ffmpeg7-runtime/$file" || exit 1
+          done
+
+      - name: Download libplist 2.7.0
+        shell: bash
+        run: |
+          curl -L -o deps/libplist.zip \
+            "https://github.com/libimobiledevice/libplist/archive/refs/tags/2.7.0.zip"
+          cd deps && unzip -q libplist.zip
+
+      - name: Create libplist config.h
+        shell: bash
+        run: |
+          cat > deps/libplist-2.7.0/config.h << 'EOF'
+          #pragma once
+          #define PACKAGE_VERSION "2.7.0"
+          #define PACKAGE_NAME "libplist"
+          #define PACKAGE_STRING "libplist 2.7.0"
+          #define HAVE_STRDUP 1
+          #define HAVE_STDINT_H 1
+          #define HAVE_STDLIB_H 1
+          #define HAVE_STRING_H 1
+          #ifdef _MSC_VER
+          #define strcasecmp _stricmp
+          #define strncasecmp _strnicmp
+          #define strdup _strdup
+          #ifndef ssize_t
+          #include <basetsd.h>
+          typedef SSIZE_T ssize_t;
+          #endif
+          #endif
+          EOF
+
+      - name: Create libplist CMakeLists.txt
+        shell: bash
+        run: |
+          cat > deps/libplist-2.7.0/CMakeLists.txt << 'EOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(libplist C CXX)
+          add_library(plist STATIC
+              src/base64.c src/bplist.c src/bytearray.c src/hashtable.c
+              src/jplist.c src/jsmn.c src/oplist.c src/out-default.c
+              src/out-limd.c src/out-plutil.c src/plist.c src/ptrarray.c
+              src/time64.c src/xplist.c
+              libcnary/cnary.c libcnary/node.c libcnary/node_list.c
+          )
+          target_include_directories(plist PUBLIC
+              ${CMAKE_CURRENT_SOURCE_DIR}/include
+              ${CMAKE_CURRENT_SOURCE_DIR}/libcnary/include
+              ${CMAKE_CURRENT_SOURCE_DIR}/src
+              ${CMAKE_CURRENT_SOURCE_DIR}
+          )
+          target_compile_definitions(plist PRIVATE HAVE_CONFIG_H=1 _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE)
+          if(MSVC)
+              target_compile_options(plist PRIVATE /wd4244 /wd4267 /wd4996 /wd4018 /wd4047 /wd4024 /wd4789)
+          endif()
+          EOF
+
+      - name: Build libplist
+        shell: cmd
+        run: |
+          cd deps\libplist-2.7.0
+          if exist build rmdir /s /q build
+          mkdir build
+          cd build
+          cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl
+          nmake
+
+      - name: Create def files
+        shell: bash
+        run: |
+          # Create .def files if not present
+          cat > deps/obs.def << 'EOFDEF'
+          LIBRARY obs
+          EXPORTS
+              obs_register_source
+              obs_register_source_s
+              obs_source_output_video
+              obs_source_output_audio
+              obs_data_get_string
+              obs_data_get_int
+              obs_data_get_bool
+              obs_data_set_default_string
+              obs_data_set_default_int
+              obs_data_set_default_bool
+              obs_properties_create
+              obs_properties_add_text
+              obs_properties_add_int
+              obs_properties_add_bool
+              obs_properties_add_list
+              obs_property_list_add_string
+              obs_property_list_add_int
+              obs_get_locale
+              blog
+              blogva
+              bzalloc
+              bmalloc
+              bfree
+              bmemdup
+              bstrdup
+              os_gettime_ns
+              text_lookup_destroy
+              text_lookup_getstr
+              obs_module_load_locale
+              obs_module_get_config_path
+          EOFDEF
+
+          cat > deps/w32-pthreads.def << 'EOFDEF'
+          LIBRARY w32-pthreads
+          EXPORTS
+              pthread_create
+              pthread_join
+              pthread_mutex_init
+              pthread_mutex_destroy
+              pthread_mutex_lock
+              pthread_mutex_unlock
+              pthread_cond_init
+              pthread_cond_destroy
+              pthread_cond_signal
+              pthread_cond_broadcast
+              pthread_cond_wait
+              pthread_cond_timedwait
+          EOFDEF
+
+          # dnssd.dll is loaded dynamically by UxPlay 1.73's dnssd.c - no import lib needed
+
+      - name: Generate import libraries from def files
+        shell: cmd
+        run: |
+          lib /def:deps\obs.def /out:deps\obs.lib /machine:x64
+          lib /def:deps\w32-pthreads.def /out:deps\w32-pthreads.lib /machine:x64
+
+      - name: Set OpenSSL path
+        id: openssl
+        shell: bash
+        run: |
+          OPENSSL_DIR="C:/Program Files/OpenSSL"
+          if [ -d "C:/Program Files/OpenSSL-Win64" ]; then
+            OPENSSL_DIR="C:/Program Files/OpenSSL-Win64"
+          fi
+          echo "dir=$OPENSSL_DIR" >> "$GITHUB_OUTPUT"
+          echo "OpenSSL dir: $OPENSSL_DIR"
+          # Debug: show lib directory contents
+          find "$OPENSSL_DIR" -name "*.lib" 2>/dev/null | head -20 || echo "No .lib files found"
+
+      - name: Apply UxPlay Windows patches and create build config
+        shell: bash
+        run: |
+          UXLIB="deps/UxPlay/lib"
+
+          # Patch compat.h - add winsock2, clock_gettime shim (MSVC), remove snprintf macro
+          sed -i 's/#include <ws2tcpip.h>/#include <winsock2.h>\n#include <ws2tcpip.h>/' "$UXLIB/compat.h"
+          sed -i '/#ifndef snprintf/,/#endif/d' "$UXLIB/compat.h"
+          # clock_gettime shim: raop_ntp.c only uses CLOCK_REALTIME. Use
+          # GetSystemTimePreciseAsFileTime (<1us) - AirPlay NTP sync needs
+          # sub-millisecond wall-clock precision or the sender never locks
+          # its clock and withholds audio. Re-audit if a future UxPlay bump
+          # starts using CLOCK_MONOTONIC.
+          sed -i '/#include <windows.h>/a #include <time.h>\n#ifndef CLOCK_REALTIME\n#define CLOCK_REALTIME 0\nstatic __inline int uxshim_clock_gettime(int clk, struct timespec *ts) { FILETIME ft; ULARGE_INTEGER ui; (void)clk; GetSystemTimePreciseAsFileTime(\&ft); ui.LowPart = ft.dwLowDateTime; ui.HighPart = ft.dwHighDateTime; ui.QuadPart -= 116444736000000000ULL; ts->tv_sec = (long long)(ui.QuadPart / 10000000ULL); ts->tv_nsec = (long)((ui.QuadPart % 10000000ULL) * 100); return 0; }\n#define clock_gettime uxshim_clock_gettime\n#endif' "$UXLIB/compat.h"
+
+          # Patch threads.h - Windows branch for w32-pthreads (no unistd.h/usleep
+          # on MSVC; plain pthread_create since w32-pthreads pthread_t is a struct
+          # and upstream's "handle = 0" failure marker would not compile)
+          cat > "$UXLIB/threads.h" << 'THEOF'
+          #ifndef THREADS_H
+          #define THREADS_H
+          #if defined(WIN32) || defined(_WIN32)
+          #include <windows.h>
+          #include <pthread.h>
+          #define sleepms(x) Sleep(x)
+          #else
+          #include <pthread.h>
+          #include <unistd.h>
+          #define sleepms(x) usleep((x)*1000)
+          #endif
+          typedef pthread_t thread_handle_t;
+          #define THREAD_RETVAL void *
+          #define THREAD_CREATE(handle, func, arg) pthread_create(&(handle), NULL, func, arg)
+          #define THREAD_JOIN(handle) pthread_join(handle, NULL)
+          typedef pthread_mutex_t mutex_handle_t;
+          typedef pthread_cond_t cond_handle_t;
+          #define MUTEX_CREATE(handle) pthread_mutex_init(&(handle), NULL)
+          #define MUTEX_LOCK(handle) pthread_mutex_lock(&(handle))
+          #define MUTEX_UNLOCK(handle) pthread_mutex_unlock(&(handle))
+          #define MUTEX_DESTROY(handle) pthread_mutex_destroy(&(handle))
+          #define COND_CREATE(handle) pthread_cond_init(&(handle), NULL)
+          #define COND_SIGNAL(handle) pthread_cond_signal(&(handle))
+          #define COND_DESTROY(handle) pthread_cond_destroy(&(handle))
+          #endif
+          THEOF
+
+          # byteutils.c and raop_ntp.c are Windows-portable in UxPlay 1.73.6.
+          # raop_rtp_mirror.c guards SOL_TCP with defined(IPPROTO_TCP), but on
+          # MSVC IPPROTO_TCP is an enum (not a macro) so the guard never fires
+          sed -i 's|#if !defined(SOL_TCP) && defined(IPPROTO_TCP)|#if !defined(SOL_TCP)|' "$UXLIB/raop_rtp_mirror.c"
+
+          # Patch httpd.c - init run_mutex (first match only: the second
+          # "joined = 1" is inside a locked region at thread exit)
+          sed -i '0,/httpd->joined = 1;/s//httpd->joined = 1;\n    MUTEX_CREATE(httpd->run_mutex);/' "$UXLIB/httpd.c"
+
+          # Create uxplay-build CMakeLists.txt
+          mkdir -p deps/uxplay-build
+          cat > deps/uxplay-build/CMakeLists.txt << 'CMEOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(uxplay-airplay C)
+          set(UXPLAY_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../UxPlay/lib")
+          set(LIBPLIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../libplist-2.7.0")
+          if(NOT DEFINED OPENSSL_DIR)
+              set(OPENSSL_DIR "C:/Program Files/OpenSSL")
+          endif()
+          set(W32_PTHREADS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../obs-sdk/obs-studio-30.0.0/deps/w32-pthreads")
+          aux_source_directory(${UXPLAY_LIB}/playfair playfair_src)
+          add_library(playfair STATIC ${playfair_src})
+          target_include_directories(playfair PUBLIC ${UXPLAY_LIB}/playfair)
+          target_compile_definitions(playfair PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN)
+          if(MSVC)
+              target_compile_options(playfair PRIVATE /wd4244 /wd4267 /wd4996)
+          endif()
+          aux_source_directory(${UXPLAY_LIB}/llhttp llhttp_src)
+          add_library(llhttp STATIC ${llhttp_src})
+          target_include_directories(llhttp PUBLIC ${UXPLAY_LIB}/llhttp)
+          target_compile_definitions(llhttp PRIVATE _CRT_SECURE_NO_WARNINGS)
+          if(MSVC)
+              target_compile_options(llhttp PRIVATE /wd4244 /wd4267 /wd4996)
+          endif()
+          set(AIRPLAY_SOURCES
+              ${UXPLAY_LIB}/airplay_video.c ${UXPLAY_LIB}/byteutils.c ${UXPLAY_LIB}/compat.c
+              ${UXPLAY_LIB}/crypto.c ${UXPLAY_LIB}/dnssd.c
+              ${UXPLAY_LIB}/mdnsd/dnssd_mdnsd.c ${UXPLAY_LIB}/mdnsd/mdnsd.c
+              ${UXPLAY_LIB}/fairplay_playfair.c
+              ${UXPLAY_LIB}/http_request.c ${UXPLAY_LIB}/http_response.c ${UXPLAY_LIB}/httpd.c
+              ${UXPLAY_LIB}/logger.c ${UXPLAY_LIB}/mirror_buffer.c ${UXPLAY_LIB}/netutils.c
+              ${UXPLAY_LIB}/pairing.c ${UXPLAY_LIB}/raop.c ${UXPLAY_LIB}/raop_buffer.c
+              ${UXPLAY_LIB}/raop_ntp.c ${UXPLAY_LIB}/raop_rtp.c ${UXPLAY_LIB}/raop_rtp_mirror.c
+              ${UXPLAY_LIB}/srp.c ${UXPLAY_LIB}/utils.c
+          )
+          add_library(airplay STATIC ${AIRPLAY_SOURCES})
+          target_include_directories(airplay PUBLIC
+              ${UXPLAY_LIB} ${UXPLAY_LIB}/playfair ${UXPLAY_LIB}/llhttp ${UXPLAY_LIB}/mdnsd
+              ${LIBPLIST_DIR}/include ${OPENSSL_DIR}/include ${W32_PTHREADS_DIR}
+          )
+          target_compile_definitions(airplay PUBLIC
+              WIN32 _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE
+              WIN32_LEAN_AND_MEAN LIBPLIST_STATIC OPENSSL_API_COMPAT=0x10101000L
+              PLIST_210 PLIST_230
+          )
+          if(MSVC)
+              target_compile_options(airplay PRIVATE /wd4244 /wd4267 /wd4996 /wd4018 /wd4146 /wd4005 /wd4133)
+          endif()
+          find_library(OPENSSL_CRYPTO_LIB NAMES libcrypto crypto libcrypto-3-x64
+              PATHS "${OPENSSL_DIR}/lib" "${OPENSSL_DIR}/lib/VC" "${OPENSSL_DIR}/lib/VC/x64" "${OPENSSL_DIR}/lib/VC/x64/MD" "${OPENSSL_DIR}/lib/VC/x64/MT"
+              NO_DEFAULT_PATH)
+          if(NOT OPENSSL_CRYPTO_LIB)
+              find_library(OPENSSL_CRYPTO_LIB NAMES libcrypto crypto)
+          endif()
+          message(STATUS "OpenSSL crypto lib: ${OPENSSL_CRYPTO_LIB}")
+          target_link_libraries(airplay PUBLIC playfair llhttp
+              ${LIBPLIST_DIR}/build/plist.lib ${OPENSSL_CRYPTO_LIB}
+              ${CMAKE_CURRENT_SOURCE_DIR}/../w32-pthreads.lib
+              ws2_32 iphlpapi
+          )
+          CMEOF
+
+      - name: Build UxPlay libraries
+        shell: cmd
+        run: |
+          cd deps\uxplay-build
+          if exist build rmdir /s /q build
+          mkdir build
+          cd build
+          cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DOPENSSL_DIR="${{ steps.openssl.outputs.dir }}"
+          nmake
+
+      - name: Build plugin
+        shell: cmd
+        run: |
+          if exist build rmdir /s /q build
+          mkdir build
+          cd build
+          cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DOPENSSL_DIR="${{ steps.openssl.outputs.dir }}"
+          nmake
+
+      - name: Prepare release artifact
+        shell: bash
+        run: |
+          mkdir -p artifact
+          cp build/obs-airplay-receiver.dll artifact/
+          cp deps/ffmpeg7-runtime/bin/avcodec-61.dll artifact/
+          cp deps/ffmpeg7-runtime/bin/avutil-59.dll artifact/
+          cp deps/ffmpeg7-runtime/bin/swscale-8.dll artifact/
+          cp deps/ffmpeg7-runtime/bin/swresample-5.dll artifact/
+          OPENSSL_DIR="${{ steps.openssl.outputs.dir }}"
+          # copy whatever libcrypto version the DLL was linked against
+          cp "$OPENSSL_DIR"/bin/libcrypto-*-x64.dll artifact/ 2>/dev/null ||
+            cp "$OPENSSL_DIR"/libcrypto-*-x64.dll artifact/
+          ls artifact/libcrypto-*-x64.dll || { echo "ERROR: no libcrypto DLL bundled"; exit 1; }
+          cp install.bat artifact/
+          cp uninstall.bat artifact/
+          cp README.md artifact/
+
+      - name: Verify packaged runtime dependencies
+        shell: cmd
+        run: |
+          dumpbin /nologo /dependents artifact\obs-airplay-receiver.dll > artifact\dependencies.txt
+          findstr /c:"avcodec-61.dll" artifact\dependencies.txt || exit /b 1
+          findstr /c:"avutil-59.dll" artifact\dependencies.txt || exit /b 1
+          findstr /c:"swscale-8.dll" artifact\dependencies.txt || exit /b 1
+          findstr /c:"swresample-5.dll" artifact\dependencies.txt || exit /b 1
+          for %%f in (avcodec-61.dll avutil-59.dll swscale-8.dll swresample-5.dll) do (
+            if not exist artifact\%%f exit /b 1
+          )
+          findstr /i /c:"dnssd.dll" /c:"mdnsNSP.dll" artifact\dependencies.txt && exit /b 1 || ver > nul
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer exe
+        shell: cmd
+        run: |
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+
+      - name: Upload artifact (zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-airplay-receiver
+          path: artifact/
+
+      - name: Upload artifact (installer)
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-airplay-receiver-installer
+          path: OBS-AirPlay-Receiver-Setup-*.exe
