@@ -273,6 +273,15 @@ jobs:
           # SSIZE_T from BaseTsd; provide the POSIX spelling expected by raop_ntp.h.
           sed -i '/#include <sys\/types.h>/a #ifdef _WIN32\n#include <BaseTsd.h>\ntypedef SSIZE_T ssize_t;\n#endif' "$UXLIB/raop_ntp.h"
 
+          # w32-pthreads pthread_t is a struct, while mdnsd.c assumes a scalar
+          # thread handle for zero/null checks. Track creation explicitly on Windows.
+          sed -i 's/THREAD_CREATE(mdnsd->thread, mdns_thread, mdnsd);/int mdns_thread_rc = THREAD_CREATE(mdnsd->thread, mdns_thread, mdnsd);/' "$UXLIB/mdnsd/mdnsd.c"
+          sed -i 's/if (!mdnsd->thread)/if (mdns_thread_rc != 0)/' "$UXLIB/mdnsd/mdnsd.c"
+          sed -i 's/thread_handle_t thread = 0;/thread_handle_t thread; int have_thread = 0;/' "$UXLIB/mdnsd/mdnsd.c"
+          sed -i 's/thread = mdnsd->thread;/thread = mdnsd->thread; have_thread = 1;/' "$UXLIB/mdnsd/mdnsd.c"
+          sed -i '/mdnsd->thread = 0;/d' "$UXLIB/mdnsd/mdnsd.c"
+          sed -i 's/if (thread) {/if (have_thread) {/' "$UXLIB/mdnsd/mdnsd.c"
+
           # byteutils.c and raop_ntp.c are Windows-portable in UxPlay 1.73.6.
           # raop_rtp_mirror.c guards SOL_TCP with defined(IPPROTO_TCP), but on
           # MSVC IPPROTO_TCP is an enum (not a macro) so the guard never fires
