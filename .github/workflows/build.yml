@@ -364,6 +364,11 @@ jobs:
           cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DOPENSSL_DIR="${{ steps.openssl.outputs.dir }}" || exit /b 1
           nmake || exit /b 1
 
+      - name: Patch plugin FFmpeg 8.1 runtime names
+        shell: bash
+        run: |
+          sed -i 's/avcodec-61\\.dll/avcodec-62.dll/g; s/avutil-59\\.dll/avutil-60.dll/g; s/swscale-8\\.dll/swscale-9.dll/g; s/swresample-5\\.dll/swresample-6.dll/g' CMakeLists.txt
+
       - name: Build plugin
         shell: cmd
         run: |
