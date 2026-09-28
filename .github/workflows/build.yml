@@ -364,6 +364,23 @@ jobs:
           cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DOPENSSL_DIR="${{ steps.openssl.outputs.dir }}" || exit /b 1
           nmake || exit /b 1
 
+      - name: Patch UxPlay 1.74 dnssd_init argument order
+        shell: bash
+        run: |
+          # UxPlay 1.74 signature is (..., pin_pw, error); the plugin's older
+          # embedded UxPlay used (..., error, pin_pw). Keep password disabled.
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("src/airplay-source.c")
+          s = p.read_text()
+          old = "hw, hw_len, &err, 0 /* no pin/password */)"
+          new = "hw, hw_len, 0 /* no pin/password */, &err)"
+          if old not in s:
+              raise SystemExit("dnssd_init call pattern not found")
+          p.write_text(s.replace(old, new))
+          PY
+          grep -n -A3 "dnssd_init(ctx->server_name" src/airplay-source.c
+
       - name: Patch UxPlay callback compatibility
         shell: bash
         run: |
