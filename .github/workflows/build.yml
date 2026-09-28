@@ -282,31 +282,9 @@ jobs:
           sed -i '/mdnsd->thread = 0;/d' "$UXLIB/mdnsd/mdnsd.c"
           sed -i 's/if (thread) {/if (have_thread) {/' "$UXLIB/mdnsd/mdnsd.c"
 
-          # UxPlay's standalone app calls raop_ntp_global_init(), but this OBS
-          # embedding does not. Current Windows raop_ntp code otherwise copies a
-          # zero global QPC frequency into each timestamp session and divides by
-          # it on the first AirPlay timing packet (Build 18 crash +0xE7A8).
-          # Make session creation self-initializing and fail-safe.
-          python - <<'PY'
-          from pathlib import Path
-          p=Path("deps/UxPlay/lib/raop_ntp.c")
-          s=p.read_text()
-          old="    session->qpc_frequency = g_system_qpc_frequency.QuadPart;\n    session ->pWSARecvMsg_ptr = NULL;"
-          new="""    session->qpc_frequency = g_system_qpc_frequency.QuadPart;
-    if (session->qpc_frequency <= 0) {
-        LARGE_INTEGER qpc_frequency;
-        if (!QueryPerformanceFrequency(&qpc_frequency) || qpc_frequency.QuadPart <= 0) {
-            free(session);
-            return NULL;
-        }
-        g_system_qpc_frequency = qpc_frequency;
-        session->qpc_frequency = qpc_frequency.QuadPart;
-    }
-    session ->pWSARecvMsg_ptr = NULL;"""
-          if old not in s:
-              raise SystemExit("QPC frequency patch pattern not found")
-          p.write_text(s.replace(old,new))
-          PY
+          # UxPlay standalone normally initializes the Windows QPC frequency.
+          # This embedding does not, so make each NTP timestamp session self-initializing.
+          python -c "from pathlib import Path; p=Path('deps/UxPlay/lib/raop_ntp.c'); s=p.read_text(); old='    session->qpc_frequency = g_system_qpc_frequency.QuadPart;\\n    session ->pWSARecvMsg_ptr = NULL;'; new='    session->qpc_frequency = g_system_qpc_frequency.QuadPart;\\n    if (session->qpc_frequency <= 0) {\\n        LARGE_INTEGER qpc_frequency;\\n        if (!QueryPerformanceFrequency(&qpc_frequency) || qpc_frequency.QuadPart <= 0) {\\n            free(session);\\n            return NULL;\\n        }\\n        g_system_qpc_frequency = qpc_frequency;\\n        session->qpc_frequency = qpc_frequency.QuadPart;\\n    }\\n    session ->pWSARecvMsg_ptr = NULL;'; assert old in s, 'QPC patch pattern missing'; p.write_text(s.replace(old,new))"
 
           # byteutils.c and raop_ntp.c are Windows-portable in UxPlay 1.73.6.
           # raop_rtp_mirror.c guards SOL_TCP with defined(IPPROTO_TCP), but on
