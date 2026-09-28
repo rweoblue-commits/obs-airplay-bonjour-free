@@ -409,7 +409,9 @@ jobs:
         run: |
           echo Crash offsets from Build 14: 0xED68 and 0xFDEF
           dumpbin /nologo /headers build\obs-airplay-receiver.dll | findstr /i ".text"
-          if exist build\obs-airplay-receiver.pdb echo PDB generated successfully
+          dir /s /b *.pdb
+          dumpbin /nologo /disasm build\obs-airplay-receiver.dll > build\plugin-disasm.txt
+          powershell -NoProfile -Command "$l=Get-Content build\\plugin-disasm.txt; $hits=Select-String -Path build\\plugin-disasm.txt -Pattern '^  000000000000ED[0-9A-F]|^  000000000000FD[E-F][0-9A-F]'; foreach($h in $hits){$n=$h.LineNumber; $a=[Math]::Max(0,$n-8); $b=[Math]::Min($l.Count-1,$n+8); $l[$a..$b]}"
 
       - name: Prepare release artifact
         shell: bash
